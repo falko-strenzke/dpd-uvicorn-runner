@@ -33,7 +33,18 @@ TODOs:
     - [ ] requests / minute
 """
 
-gl_pali_alphabet = "aābcdḍeghiījklḷmṁṃnñṇṅoprṛsṣśtṭuūvy"
+
+PALI_LONG_VOWELS = "āīū"
+PALI_VAR_LEN_VOWELS = "eo"
+PALI_VOWELS = "aiu" + PALI_LONG_VOWELS + PALI_VAR_LEN_VOWELS
+
+
+PALI_NASALS = "mnṇṅṃṁñ"
+PALI_NON_NASAL_CONSONANTS = "bcdḍghklḷprṛsśṣtṭvy" + PALI_NASALS
+PALI_CONSONANTS = PALI_NON_NASAL_CONSONANTS + PALI_NASALS
+
+PALI_ALPHABET = PALI_VOWELS + PALI_CONSONANTS
+PALI_TEXT_ALLOWED_CHARS = PALI_ALPHABET + "-–—'\"`"
 
 DEFAULT_CFG = "config.ini"
 
@@ -42,20 +53,20 @@ SERVER_STATS = ServerStats()
 # geo lite db can be downloaded here: https://github.com/P3TERX/GeoLite.mmdb?tab=readme-ov-file
 gl_mmdb_file = ""
 gl_mmdb_reader = None
-gl_logger : Optional[logging.Logger] = None
-#gl_exit_requested  : bool = False
+gl_logger: Optional[logging.Logger] = None
+# gl_exit_requested  : bool = False
 
 gl_country_req_cnt_map: dict[str, int] = {}
 
 
-RANDOM_STRING_KEY : bytes = "".join(
+RANDOM_STRING_KEY: bytes = "".join(
     random.SystemRandom().choice(string.ascii_letters + string.digits)
     for _ in range(40)
 ).encode()
 
 
 # from https://www.finnie.org/2020/09/29/the-perfect-ip-hashing-algorithm/
-def hash_ip(ip_str : str, key : bytes) -> str:
+def hash_ip(ip_str: str, key: bytes) -> str:
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError as e:
@@ -124,7 +135,7 @@ def configure(ctx, param, filename):
     ctx.default_map = options
 
 
-def parse_origin_country_from_mmdb_lookup(j: dict, server_stats : ServerStats) -> str:
+def parse_origin_country_from_mmdb_lookup(j: dict, server_stats: ServerStats) -> str:
     country = "<ip-from-co:"
     iso_code = ""
     try:
@@ -140,12 +151,14 @@ def parse_origin_country_from_mmdb_lookup(j: dict, server_stats : ServerStats) -
     return country
 
 
-def ip_anon_and_to_country(ip: str, server_stats : ServerStats) -> str:
+def ip_anon_and_to_country(ip: str, server_stats: ServerStats) -> str:
     if gl_mmdb_reader is None:
         raise Exception("mmdb reader not set")
     dict_result = gl_mmdb_reader.get(ip)
     anon_ip = hash_ip(ip, RANDOM_STRING_KEY)
-    return anon_ip + ":" + parse_origin_country_from_mmdb_lookup(dict_result, server_stats)
+    return (
+        anon_ip + ":" + parse_origin_country_from_mmdb_lookup(dict_result, server_stats)
+    )
 
 
 def is_get_request_log_line(line: str) -> bool:
@@ -157,7 +170,9 @@ def is_get_request_log_line(line: str) -> bool:
     return True
 
 
-def replace_ipv4_addresses_with_geo_country(line: str, server_stats : ServerStats) -> str:
+def replace_ipv4_addresses_with_geo_country(
+    line: str, server_stats: ServerStats
+) -> str:
     if not is_get_request_log_line(line):
         return line
     match = re.findall(r"([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})", line)
@@ -167,28 +182,114 @@ def replace_ipv4_addresses_with_geo_country(line: str, server_stats : ServerStat
     return line
 
 
+def str_len_excl_ws(s : str) -> int:
+    return len("".join(s.split()))
+
+
 def make_url_param_repl_str(explanation: str) -> str:
     return f"REMOVED BY RULE: <{explanation}>"
 
 
-def list_non_pali_characters_in_str(s: str) -> str:
+def list_non_pali_characters_in_str(s: str) -> tuple[str, int]:
+    s = s.lower()
     res_set: set[str] = set()
+    count = 0
     for char in s:
-        if char not in gl_pali_alphabet:
+        if char not in PALI_TEXT_ALLOWED_CHARS:
             res_set.add(char)
-    return "".join(res_set)
+            count += 1
+    return ("".join(res_set), count)
+
+
+def penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s: str) -> tuple[float, list[str]]:
+    s = s.lower()
+    # nasal as first character is treated generically below.
+    # h as second or third is also treated below.
+    whitelist = ["tr", "ṭr" ]
+    penalty = 0
+    offending_clusters = set()
+    for i, c in enumerate(s):
+        if i == len(s) - 1:
+            # don't look at the last character
+            break
+        c2 = s[i + 1]
+        c3 = None
+        if i < len(s) - 2:
+            c3 = s[i + 2]
+        if c in PALI_CONSONANTS:
+            if c2 in PALI_CONSONANTS and c + c2 not in whitelist and c2 != "h" and c2 != c and c not in PALI_NASALS:
+                penalty += 10
+                offending_clusters.add(c + c2)
+                if c3:
+                    if (c3 != "h" or c2 == "h") and c3 in PALI_CONSONANTS:
+                        penalty += 30
+    return (penalty, list(offending_clusters))
+
+
+def penalty_for_vowel_clusters_unlikely_to_occur_in_pali(s : str) -> tuple[float, list[str]]:
+    s = s.lower()
+    penalty = 0
+    offending_clusters = set()
+    for i, c in enumerate(s):
+        if i == len(s) - 1:
+            # don't look at the last character
+            break
+        c2 = s[i + 1]
+        c3 = None
+        if i < len(s) - 2:
+            c3 = s[i + 2]
+        if c in PALI_VOWELS:
+            if c2 in PALI_VOWELS:
+                penalty += 7
+                offending_clusters.add(c + c2)
+                if c3:
+                    if c3 in PALI_VOWELS:
+                        penalty += 50
+    return (penalty, list(offending_clusters))
+
+
+def has_str_offending_vowel_or_consonant_clusters(s : str) -> tuple[bool, str]:
+    (penalty_1, clust_1) = penalty_for_vowel_clusters_unlikely_to_occur_in_pali(s)
+    (penalty_2, clust_2) = penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s)
+    penalty = penalty_1 + penalty_2
+    clust_1.extend(clust_2)
+    scaled_penalty = penalty / str_len_excl_ws(s)
+    if scaled_penalty > 1.0:
+        return (True, ",".join(clust_1))
+    return (False, "")
+
+
+def has_str_words_with_mixed_upper_and_lowercase(s: str) -> bool:
+    words: list[str] = s.split()
+    for w in words:
+        if w.islower() or w.isupper() or (w[0].isupper() and w[1:].islower()):
+            continue
+        return True
+    return False
 
 
 def filter_search_str_url_encoded(match_obj: regex.Match) -> str:
+    max_nb_words_in_query = 6
     if match_obj:
         s = unquote(match_obj.group(0))
-        if s.count(" ") > 0:
-            return make_url_param_repl_str("more than one word")
-        non_pali_chars: str = list_non_pali_characters_in_str(s)
-        if len(non_pali_chars) > 0:
+        if s.count(" ") > max_nb_words_in_query:
+            return make_url_param_repl_str(f"more than {max_nb_words_in_query} words in search string")
+        (non_pali_chars, non_pali_char_cnt) = list_non_pali_characters_in_str(s)
+        print("non_pali_char_cnt / str_len_excl_ws(s): " + str(non_pali_char_cnt / str_len_excl_ws(s)))
+        if non_pali_char_cnt > 1 and ((non_pali_char_cnt / str_len_excl_ws(s)) > 0.1):
             return make_url_param_repl_str(
                 "non-pali character(s) in search string: " + non_pali_chars
             )
+        (
+            has_off_clusts,
+            off_clust_list,
+        ) = has_str_offending_vowel_or_consonant_clusters(s)
+        if has_off_clusts:
+            return make_url_param_repl_str(
+                "offending consonant or vowel clusters in search string: " + off_clust_list
+            )
+        if has_str_words_with_mixed_upper_and_lowercase(s):
+            return make_url_param_repl_str("words with mixed upper and lower case letters in search string")
         return match_obj.group(0)
     else:
         return "<unexpectedly received empty match obj for search string replacement>"
@@ -200,17 +301,23 @@ def filter_search_str_from_get_req_line(line: str) -> str:
         repl=filter_search_str_url_encoded,
         string=line,
     )
-    # return regex.sub(pattern=r'(?<=GET /.*search=)([^ ]+)(?=HTTP/)', repl=filter_search_str_url_encoded, string=line)
 
 
-def log_server_stats_after_intervall(server_stats : ServerStats, server_stats_intervall_mins : int, server_stats_path, force : bool) -> None:
+def log_server_stats_after_intervall(
+    server_stats: ServerStats,
+    server_stats_intervall_mins: int,
+    server_stats_path,
+    force: bool,
+) -> None:
     now = datetime.now()
-    time_for_next_write = timedelta(minutes=server_stats_intervall_mins) + server_stats.get_last_written()
+    time_for_next_write = (
+        timedelta(minutes=server_stats_intervall_mins) + server_stats.get_last_written()
+    )
     server_stats.last_written_to_now()
     json_str = str(server_stats)
     if time_for_next_write <= now or force:
-       with open(server_stats_path, 'w') as file:
-           file.write(json_str)
+        with open(server_stats_path, "w") as file:
+            file.write(json_str)
 
 
 def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
@@ -218,16 +325,12 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     gl_logger = logging.getLogger("Rotating Log")
     gl_logger.setLevel(logging.INFO)
     gl_logger.setLevel(logging.INFO)
-    handler = TimedRotatingFileHandler(path,
-                                       when="D",
-                                       interval=log_rotation_days,
-                                       backupCount=log_backup_count)
+    handler = TimedRotatingFileHandler(
+        path, when="D", interval=log_rotation_days, backupCount=log_backup_count
+    )
     gl_logger.addHandler(handler)
     gl_logger.addHandler(handler)
     gl_logger.info(f"logging started with interval of {log_rotation_days} days")
-
-
-
 
 
 @click.group(invoke_without_command=True)
@@ -303,7 +406,14 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     default=8080,
     help="Port on which the uvicorn application will listen.",
 )
-def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days, server_stats_path, server_stats_intervall_mins):
+def main_function(
+    port,
+    geo_lite_db_file,
+    log_backup_count,
+    log_rotation_days,
+    server_stats_path,
+    server_stats_intervall_mins,
+):
     """
     Main function
     """
@@ -316,9 +426,13 @@ def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days, s
     signal.signal(signal.SIGINT, signal_handler_sigint)
     create_timed_rotating_log("./dpd-fastapi.log", log_rotation_days, log_backup_count)
     server_stats_str = ""
-    with open(server_stats_path, 'r') as file:
+    with open(server_stats_path, "r") as file:
         server_stats_str = file.read()
-    gl_logger.info("server stats file on disk was" + (": " + server_stats_str) if server_stats_str != "" else " empty")
+    gl_logger.info(
+        "server stats file on disk was" + (": " + server_stats_str)
+        if server_stats_str != ""
+        else " empty"
+    )
     server_stats = ServerStats(server_stats_str)
     init_mmdb(geo_lite_db_file)
     process = create_process(port)
@@ -330,7 +444,12 @@ def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days, s
 
         while True:
             force_server_stats_write = exit_requested
-            log_server_stats_after_intervall(server_stats, server_stats_intervall_mins, server_stats_path, force=force_server_stats_write)
+            log_server_stats_after_intervall(
+                server_stats,
+                server_stats_intervall_mins,
+                server_stats_path,
+                force=force_server_stats_write,
+            )
             if force_server_stats_write:
                 # breaking here ensures we have written the server stats
                 break
