@@ -17,10 +17,14 @@ import ipaddress
 import random
 import string
 from typing import Optional
+from stats import ServerStats
+from datetime import timedelta
+import signal
+
 
 """
 TODOs:
-- [ ] logging of anonymized IPs (tracked for some time intervall)
+- [X] logging of anonymized IPs (tracked for some time intervall)
 - [ ] catch exception on level of main and write to an exception log (runner will exit, but subprocess will continue)
 - [ ] long term stats file:
     - [ ] written at intervals (and also on shutdown)
@@ -33,11 +37,13 @@ gl_pali_alphabet = "aābcdḍeghiījklḷmṁṃnñṇṅoprṛsṣśtṭuūvy"
 
 DEFAULT_CFG = "config.ini"
 
+SERVER_STATS = ServerStats()
+
 # geo lite db can be downloaded here: https://github.com/P3TERX/GeoLite.mmdb?tab=readme-ov-file
 gl_mmdb_file = ""
 gl_mmdb_reader = None
 gl_logger : Optional[logging.Logger] = None
-
+#gl_exit_requested  : bool = False
 
 gl_country_req_cnt_map: dict[str, int] = {}
 
@@ -118,7 +124,7 @@ def configure(ctx, param, filename):
     ctx.default_map = options
 
 
-def parse_origin_country_from_mmdb_lookup(j: dict) -> str:
+def parse_origin_country_from_mmdb_lookup(j: dict, server_stats : ServerStats) -> str:
     country = "<ip-from-co:"
     iso_code = ""
     try:
@@ -129,18 +135,17 @@ def parse_origin_country_from_mmdb_lookup(j: dict) -> str:
         iso_code = j["country"]["iso"]
     except:
         iso_code = "mmdb-lookup-failure>"
-    count = gl_country_req_cnt_map.get(iso_code, 0)
-    gl_country_req_cnt_map[iso_code] = count + 1
+    server_stats.count_country_code(iso_code)
     gl_logger.info("country stats: " + str(gl_country_req_cnt_map))
     return country
 
 
-def ip_anon_and_to_country(ip: str) -> str:
+def ip_anon_and_to_country(ip: str, server_stats : ServerStats) -> str:
     if gl_mmdb_reader is None:
         raise Exception("mmdb reader not set")
     dict_result = gl_mmdb_reader.get(ip)
     anon_ip = hash_ip(ip, RANDOM_STRING_KEY)
-    return anon_ip + ":" + parse_origin_country_from_mmdb_lookup(dict_result)
+    return anon_ip + ":" + parse_origin_country_from_mmdb_lookup(dict_result, server_stats)
 
 
 def is_get_request_log_line(line: str) -> bool:
@@ -152,12 +157,12 @@ def is_get_request_log_line(line: str) -> bool:
     return True
 
 
-def replace_ipv4_addresses_with_geo_country(line: str) -> str:
+def replace_ipv4_addresses_with_geo_country(line: str, server_stats : ServerStats) -> str:
     if not is_get_request_log_line(line):
         return line
     match = re.findall(r"([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})", line)
     if match:
-        anon_ip_with_country = ip_anon_and_to_country(match[0])
+        anon_ip_with_country = ip_anon_and_to_country(match[0], server_stats)
         return re.sub(pattern=match[0], repl=anon_ip_with_country, string=line)
     return line
 
@@ -198,6 +203,16 @@ def filter_search_str_from_get_req_line(line: str) -> str:
     # return regex.sub(pattern=r'(?<=GET /.*search=)([^ ]+)(?=HTTP/)', repl=filter_search_str_url_encoded, string=line)
 
 
+def log_server_stats_after_intervall(server_stats : ServerStats, server_stats_intervall_mins : int, server_stats_path, force : bool) -> None:
+    now = datetime.now()
+    time_for_next_write = timedelta(minutes=server_stats_intervall_mins) + server_stats.get_last_written()
+    server_stats.last_written_to_now()
+    json_str = str(server_stats)
+    if time_for_next_write <= now or force:
+       with open(server_stats_path, 'w') as file:
+           file.write(json_str)
+
+
 def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     global gl_logger
     gl_logger = logging.getLogger("Rotating Log")
@@ -210,6 +225,9 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     gl_logger.addHandler(handler)
     gl_logger.addHandler(handler)
     gl_logger.info(f"logging started with interval of {log_rotation_days} days")
+
+
+
 
 
 @click.group(invoke_without_command=True)
@@ -227,12 +245,34 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
 @click.option(
     "-g",
     "--geo-lite-db-file",
-    type=click.Path(dir_okay=False),
+    type=click.Path(dir_okay=False, exists=True),
     default="GeoLite2-Country.mmdb",
     callback=None,
     is_eager=False,
     expose_value=True,
-    help="configure the Geo Lite DB",
+    help="Path to the Geo Lite DB (country) file",
+    show_default=True,
+)
+@click.option(
+    "-s",
+    "--server-stats-path",
+    type=click.Path(dir_okay=False, exists=True),
+    default="server-stats.json",
+    callback=None,
+    is_eager=False,
+    expose_value=True,
+    help="Path to the server stats file for keeping server statistics over different invocations of the server. The file must exist, but it may be empty to set up a new statistics log.",
+    show_default=True,
+)
+@click.option(
+    "-i",
+    "--server-stats-intervall-mins",
+    type=click.INT,
+    default=60,
+    callback=None,
+    is_eager=False,
+    expose_value=True,
+    help="Intervall in minutes after which the server-stats file is updated on disk",
     show_default=True,
 )
 @click.option(
@@ -263,11 +303,23 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     default=8080,
     help="Port on which the uvicorn application will listen.",
 )
-def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days):
+def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days, server_stats_path, server_stats_intervall_mins):
     """
     Main function
     """
+    exit_requested = False
+
+    def signal_handler_sigint(sig, frame):
+        exit_requested = True
+        gl_logger.info("received signal SIGINT, exiting")
+
+    signal.signal(signal.SIGINT, signal_handler_sigint)
     create_timed_rotating_log("./dpd-fastapi.log", log_rotation_days, log_backup_count)
+    server_stats_str = ""
+    with open(server_stats_path, 'r') as file:
+        server_stats_str = file.read()
+    gl_logger.info("server stats file on disk was" + (": " + server_stats_str) if server_stats_str != "" else " empty")
+    server_stats = ServerStats(server_stats_str)
     init_mmdb(geo_lite_db_file)
     process = create_process(port)
 
@@ -277,14 +329,20 @@ def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days):
         os.set_blocking(process.stderr.fileno(), False)
 
         while True:
+            force_server_stats_write = exit_requested
+            log_server_stats_after_intervall(server_stats, server_stats_intervall_mins, server_stats_path, force=force_server_stats_write)
+            if force_server_stats_write:
+                # breaking here ensures we have written the server stats
+                break
+
             stderr = process.stderr.readline()
             stdout = process.stdout.readline()
             if stderr != "":
-                stderr = replace_ipv4_addresses_with_geo_country(stderr)
+                stderr = replace_ipv4_addresses_with_geo_country(stderr, server_stats)
                 stderr = filter_search_str_from_get_req_line(stderr)
                 gl_logger.info(process_log_line(stderr.strip()))
             if stdout != "":
-                stdout = replace_ipv4_addresses_with_geo_country(stdout)
+                stdout = replace_ipv4_addresses_with_geo_country(stdout, server_stats)
                 stdout = filter_search_str_from_get_req_line(stdout)
                 gl_logger.info(process_log_line(stdout.strip()))
             if stdout == "" and stderr == "":
@@ -298,7 +356,7 @@ def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days):
                     gl_logger.info(process_log_line(output.strip()))
                 for output in process.stdout.readlines():
                     gl_logger.info(process_log_line(output.strip()))
-                break
+                exit_requested = True
     except Exception:
         gl_logger.error(traceback.format_exc())
 
