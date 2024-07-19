@@ -12,11 +12,21 @@ from urllib.parse import unquote
 import regex
 import logging
 from logging.handlers import TimedRotatingFileHandler
+import hashlib
+import ipaddress
+import random
+import string
+from typing import Optional
 
 """
 TODOs:
 - [ ] logging of anonymized IPs (tracked for some time intervall)
 - [ ] catch exception on level of main and write to an exception log (runner will exit, but subprocess will continue)
+- [ ] long term stats file:
+    - [ ] written at intervals (and also on shutdown)
+    - [ ] read in to init the stats when starting up
+    - [ ] requests per country for each month
+    - [ ] requests / minute
 """
 
 gl_pali_alphabet = "aābcdḍeghiījklḷmṁṃnñṇṅoprṛsṣśtṭuūvy"
@@ -26,12 +36,33 @@ DEFAULT_CFG = "config.ini"
 # geo lite db can be downloaded here: https://github.com/P3TERX/GeoLite.mmdb?tab=readme-ov-file
 gl_mmdb_file = ""
 gl_mmdb_reader = None
-gl_logger = None
-
-gl_country_req_cnt_map : dict[str, int] = {}
+gl_logger : Optional[logging.Logger] = None
 
 
-def create_process(port : int):
+gl_country_req_cnt_map: dict[str, int] = {}
+
+
+RANDOM_STRING_KEY : bytes = "".join(
+    random.SystemRandom().choice(string.ascii_letters + string.digits)
+    for _ in range(40)
+).encode()
+
+
+# from https://www.finnie.org/2020/09/29/the-perfect-ip-hashing-algorithm/
+def hash_ip(ip_str : str, key : bytes) -> str:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError as e:
+        return "IP conversion error: " + str(e)
+    last_len = -8 if ip.version == 6 else -1
+    base_bytes = ip.packed[:last_len]
+    last_bytes = ip.packed[last_len:]
+    base_bhash = hashlib.shake_256(key + base_bytes).digest(len(base_bytes))
+    last_bhash = hashlib.shake_256(key + ip.packed).digest(len(last_bytes))
+    return str(ipaddress.ip_address(base_bhash + last_bhash))
+
+
+def create_process(port: int):
     """
     Create the uvicorn process
     """
@@ -87,24 +118,35 @@ def configure(ctx, param, filename):
     ctx.default_map = options
 
 
-def parse_origin_country_from_mmdb_lookup(j : dict) -> str:
+def parse_origin_country_from_mmdb_lookup(j: dict) -> str:
     country = "<ip-from-co:"
+    iso_code = ""
     try:
-        country += j['country']['names']['en'] + ">"
+        country += j["country"]["names"]["en"] + ">"
     except:
-        country += 'mmdb-lookup-failure>'
+        country += "mmdb-lookup-failure>"
+    try:
+        iso_code = j["country"]["iso"]
+    except:
+        iso_code = "mmdb-lookup-failure>"
+    count = gl_country_req_cnt_map.get(iso_code, 0)
+    gl_country_req_cnt_map[iso_code] = count + 1
+    gl_logger.info("country stats: " + str(gl_country_req_cnt_map))
     return country
 
 
-def ip_to_country(ip: str) -> str:
+def ip_anon_and_to_country(ip: str) -> str:
     if gl_mmdb_reader is None:
         raise Exception("mmdb reader not set")
     dict_result = gl_mmdb_reader.get(ip)
-    return parse_origin_country_from_mmdb_lookup(dict_result)
+    anon_ip = hash_ip(ip, RANDOM_STRING_KEY)
+    return anon_ip + ":" + parse_origin_country_from_mmdb_lookup(dict_result)
 
 
-def is_get_request_log_line(line : str) -> bool:
-    match = re.match(r'.*[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5} - "GET ', line)
+def is_get_request_log_line(line: str) -> bool:
+    match = re.match(
+        r'.*[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5} - "GET ', line
+    )
     if not match:
         return False
     return True
@@ -113,24 +155,23 @@ def is_get_request_log_line(line : str) -> bool:
 def replace_ipv4_addresses_with_geo_country(line: str) -> str:
     if not is_get_request_log_line(line):
         return line
-    match = re.findall(r'([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})', line)
+    match = re.findall(r"([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})", line)
     if match:
-        country = ip_to_country(match[0])
-        return re.sub(pattern=match[0], repl=country, string=line)
+        anon_ip_with_country = ip_anon_and_to_country(match[0])
+        return re.sub(pattern=match[0], repl=anon_ip_with_country, string=line)
     return line
 
 
-def make_url_param_repl_str(explanation : str) -> str:
+def make_url_param_repl_str(explanation: str) -> str:
     return f"REMOVED BY RULE: <{explanation}>"
 
 
-def list_non_pali_characters_in_str(s : str) -> str:
-    res_set : set[str] = set()
+def list_non_pali_characters_in_str(s: str) -> str:
+    res_set: set[str] = set()
     for char in s:
         if char not in gl_pali_alphabet:
             res_set.add(char)
     return "".join(res_set)
-
 
 
 def filter_search_str_url_encoded(match_obj: regex.Match) -> str:
@@ -138,30 +179,36 @@ def filter_search_str_url_encoded(match_obj: regex.Match) -> str:
         s = unquote(match_obj.group(0))
         if s.count(" ") > 0:
             return make_url_param_repl_str("more than one word")
-        non_pali_chars : str = list_non_pali_characters_in_str(s)
+        non_pali_chars: str = list_non_pali_characters_in_str(s)
         if len(non_pali_chars) > 0:
-            return make_url_param_repl_str("non-pali character(s) in search string: " + non_pali_chars)
+            return make_url_param_repl_str(
+                "non-pali character(s) in search string: " + non_pali_chars
+            )
         return match_obj.group(0)
     else:
-        return '<unexpectedly received empty match obj for search string replacement>'
+        return "<unexpectedly received empty match obj for search string replacement>"
 
 
-def filter_search_str_from_get_req_line(line : str) -> str:
-    return regex.sub(pattern=r'(?<=GET /.*search=)([^ ]+)', repl=filter_search_str_url_encoded, string=line)
-    return regex.sub(pattern=r'(?<=GET /.*search=)([^ ]+)(?=HTTP/)', repl=filter_search_str_url_encoded, string=line)
+def filter_search_str_from_get_req_line(line: str) -> str:
+    return regex.sub(
+        pattern=r"(?<=GET /.*search=)([^ ]+)",
+        repl=filter_search_str_url_encoded,
+        string=line,
+    )
+    # return regex.sub(pattern=r'(?<=GET /.*search=)([^ ]+)(?=HTTP/)', repl=filter_search_str_url_encoded, string=line)
 
 
 def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
-    """"""
     global gl_logger
     gl_logger = logging.getLogger("Rotating Log")
+    gl_logger.setLevel(logging.INFO)
     gl_logger.setLevel(logging.INFO)
     handler = TimedRotatingFileHandler(path,
                                        when="D",
                                        interval=log_rotation_days,
                                        backupCount=log_backup_count)
     gl_logger.addHandler(handler)
-
+    gl_logger.addHandler(handler)
     gl_logger.info(f"logging started with interval of {log_rotation_days} days")
 
 
@@ -210,13 +257,17 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     help="number of old log files to keep",
     show_default=True,
 )
-@click.option("--port", type=int, default=8080, help="Port on which the uvicorn application will listen.")
+@click.option(
+    "--port",
+    type=int,
+    default=8080,
+    help="Port on which the uvicorn application will listen.",
+)
 def main_function(port, geo_lite_db_file, log_backup_count, log_rotation_days):
     """
     Main function
     """
-    log_file = "dpd-fastapi.log"
-    create_timed_rotating_log(log_file, log_rotation_days, log_backup_count)
+    create_timed_rotating_log("./dpd-fastapi.log", log_rotation_days, log_backup_count)
     init_mmdb(geo_lite_db_file)
     process = create_process(port)
 
