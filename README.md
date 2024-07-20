@@ -7,7 +7,7 @@ It has the following features:
 - log file rotation:
   - the current log file is `dpd-fastapi.log`
   - older log files have a number appended
-  - they are rotate every 30 days (interval configurable)
+  - they are rotated every 30 days (interval configurable)
   - by default 6 log files are kept (number configurable)
 - logging of URL-decoded search strings
 - IP country lookup:
