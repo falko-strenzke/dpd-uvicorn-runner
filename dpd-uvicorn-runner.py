@@ -337,9 +337,9 @@ def log_server_stats_after_intervall(
     time_for_next_write = (
         timedelta(minutes=server_stats_intervall_mins) + server_stats.get_last_written()
     )
-    server_stats.last_written_to_now()
-    json_str = str(server_stats)
     if time_for_next_write <= now or force:
+        server_stats.last_written_to_now()
+        json_str = str(server_stats)
         with open(server_stats_path, "w") as file:
             file.write(json_str)
 
