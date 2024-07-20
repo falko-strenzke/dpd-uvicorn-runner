@@ -33,6 +33,7 @@ TODOs:
     - [ ] requests / minute
 """
 
+#DIGITS = "0123456789"
 
 PALI_LONG_VOWELS = "āīū"
 PALI_VAR_LEN_VOWELS = "eo"
@@ -182,11 +183,15 @@ def replace_ipv4_addresses_with_geo_country(
     return line
 
 
-def str_len_excl_ws(s : str) -> int:
+def str_len_excl_ws(s: str) -> int:
     return len("".join(s.split()))
 
 
-def make_url_param_repl_str(explanation: str) -> str:
+def make_url_param_repl_str(
+    original: str, explanation: str, simulate_filtering_only: bool
+) -> str:
+    if simulate_filtering_only:
+        return f"'{original}' would have been REMOVED BY RULE: <{explanation}>"
     return f"REMOVED BY RULE: <{explanation}>"
 
 
@@ -194,18 +199,23 @@ def list_non_pali_characters_in_str(s: str) -> tuple[str, int]:
     s = s.lower()
     res_set: set[str] = set()
     count = 0
-    for char in s:
+    for i, char in enumerate(s):
         if char not in PALI_TEXT_ALLOWED_CHARS:
+            if char.isdigit() and i == len(s) - 1 or (i < len(s) - 1 and s[i + 1] == " "):
+                # allow single digits at the end of a word
+                continue
             res_set.add(char)
             count += 1
     return ("".join(res_set), count)
 
 
-def penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s: str) -> tuple[float, list[str]]:
+def penalty_for_consonant_clusters_unlikely_to_occur_in_pali(
+    s: str,
+) -> tuple[float, list[str]]:
     s = s.lower()
     # nasal as first character is treated generically below.
     # h as second or third is also treated below.
-    whitelist = ["tr", "ṭr" ]
+    whitelist = ["tr", "ṭr"]
     penalty = 0
     offending_clusters = set()
     for i, c in enumerate(s):
@@ -217,7 +227,13 @@ def penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s: str) -> tuple[fl
         if i < len(s) - 2:
             c3 = s[i + 2]
         if c in PALI_CONSONANTS:
-            if c2 in PALI_CONSONANTS and c + c2 not in whitelist and c2 != "h" and c2 != c and c not in PALI_NASALS:
+            if (
+                c2 in PALI_CONSONANTS
+                and c + c2 not in whitelist
+                and c2 != "h"
+                and c2 != c
+                and c not in PALI_NASALS
+            ):
                 penalty += 10
                 offending_clusters.add(c + c2)
                 if c3:
@@ -226,7 +242,9 @@ def penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s: str) -> tuple[fl
     return (penalty, list(offending_clusters))
 
 
-def penalty_for_vowel_clusters_unlikely_to_occur_in_pali(s : str) -> tuple[float, list[str]]:
+def penalty_for_vowel_clusters_unlikely_to_occur_in_pali(
+    s: str,
+) -> tuple[float, list[str]]:
     s = s.lower()
     penalty = 0
     offending_clusters = set()
@@ -248,7 +266,7 @@ def penalty_for_vowel_clusters_unlikely_to_occur_in_pali(s : str) -> tuple[float
     return (penalty, list(offending_clusters))
 
 
-def has_str_offending_vowel_or_consonant_clusters(s : str) -> tuple[bool, str]:
+def has_str_offending_vowel_or_consonant_clusters(s: str) -> tuple[bool, str]:
     (penalty_1, clust_1) = penalty_for_vowel_clusters_unlikely_to_occur_in_pali(s)
     (penalty_2, clust_2) = penalty_for_consonant_clusters_unlikely_to_occur_in_pali(s)
     penalty = penalty_1 + penalty_2
@@ -262,23 +280,33 @@ def has_str_offending_vowel_or_consonant_clusters(s : str) -> tuple[bool, str]:
 def has_str_words_with_mixed_upper_and_lowercase(s: str) -> bool:
     words: list[str] = s.split()
     for w in words:
-        if w.islower() or w.isupper() or (w[0].isupper() and w[1:].islower()):
+        if w[-1].isdigit():
+            #ignore single trailing digits
+            w = w[0:-1]
+        if w == "" or w.islower() or w.isupper() or (w[0].isupper() and w[1:].islower()):
             continue
         return True
     return False
 
 
-def filter_search_str_url_encoded(match_obj: regex.Match) -> str:
+def filter_search_str_url_encoded(
+    match_obj: regex.Match, simulate_filtering_only: bool
+) -> str:
     max_nb_words_in_query = 6
     if match_obj:
         s = unquote(match_obj.group(0))
         if s.count(" ") > max_nb_words_in_query:
-            return make_url_param_repl_str(f"more than {max_nb_words_in_query} words in search string")
+            return make_url_param_repl_str(
+                s,
+                f"more than {max_nb_words_in_query} words in search string",
+                simulate_filtering_only,
+            )
         (non_pali_chars, non_pali_char_cnt) = list_non_pali_characters_in_str(s)
-        print("non_pali_char_cnt / str_len_excl_ws(s): " + str(non_pali_char_cnt / str_len_excl_ws(s)))
         if non_pali_char_cnt > 1 and ((non_pali_char_cnt / str_len_excl_ws(s)) > 0.1):
             return make_url_param_repl_str(
-                "non-pali character(s) in search string: " + non_pali_chars
+                s,
+                "non-pali character(s) in search string: " + non_pali_chars,
+                simulate_filtering_only,
             )
         (
             has_off_clusts,
@@ -286,19 +314,28 @@ def filter_search_str_url_encoded(match_obj: regex.Match) -> str:
         ) = has_str_offending_vowel_or_consonant_clusters(s)
         if has_off_clusts:
             return make_url_param_repl_str(
-                "offending consonant or vowel clusters in search string: " + off_clust_list
+                s,
+                "offending consonant or vowel clusters in search string: "
+                + off_clust_list,
+                simulate_filtering_only,
             )
         if has_str_words_with_mixed_upper_and_lowercase(s):
-            return make_url_param_repl_str("words with mixed upper and lower case letters in search string")
+            return make_url_param_repl_str(
+                s,
+                "words with mixed upper and lower case letters in search string",
+                simulate_filtering_only,
+            )
         return match_obj.group(0)
     else:
         return "<unexpectedly received empty match obj for search string replacement>"
 
 
-def filter_search_str_from_get_req_line(line: str) -> str:
+def filter_search_str_from_get_req_line(line: str, simulate_filtering_only : bool) -> str:
+    def filter_func(match_obj: regex.Match):
+        return filter_search_str_url_encoded(match_obj , simulate_filtering_only)
     return regex.sub(
         pattern=r"(?<=GET /.*search=)([^ ]+)",
-        repl=filter_search_str_url_encoded,
+        repl=filter_func,
         string=line,
     )
 
@@ -400,6 +437,7 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     help="number of old log files to keep",
     show_default=True,
 )
+@click.option("--simulate-search-string-filtering", is_flag=True, show_default=True, default=False, help="Simulate the search string filtering for requests only: indicate which search string would have been removed by which rule.")
 @click.option(
     "--port",
     type=int,
@@ -413,6 +451,7 @@ def main_function(
     log_rotation_days,
     server_stats_path,
     server_stats_intervall_mins,
+    simulate_search_string_filtering
 ):
     """
     Main function
@@ -458,11 +497,11 @@ def main_function(
             stdout = process.stdout.readline()
             if stderr != "":
                 stderr = replace_ipv4_addresses_with_geo_country(stderr, server_stats)
-                stderr = filter_search_str_from_get_req_line(stderr)
+                stderr = filter_search_str_from_get_req_line(stderr, simulate_search_string_filtering)
                 gl_logger.info(process_log_line(stderr.strip()))
             if stdout != "":
                 stdout = replace_ipv4_addresses_with_geo_country(stdout, server_stats)
-                stdout = filter_search_str_from_get_req_line(stdout)
+                stdout = filter_search_str_from_get_req_line(stdout, simulate_search_string_filtering)
                 gl_logger.info(process_log_line(stdout.strip()))
             if stdout == "" and stderr == "":
                 time.sleep(1)
