@@ -325,7 +325,7 @@ def filter_search_str_url_encoded(
                 "words with mixed upper and lower case letters in search string",
                 simulate_filtering_only,
             )
-        return match_obj.group(0)
+        return f"{match_obj.group(0)}<url-decoded: {s}>"
     else:
         return "<unexpectedly received empty match obj for search string replacement>"
 
