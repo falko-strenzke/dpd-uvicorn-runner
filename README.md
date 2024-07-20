@@ -9,6 +9,7 @@ It has the following features:
   - older log files have a number appended
   - they are rotate every 30 days (interval configurable)
   - by default 6 log files are kept (number configurable)
+- logging of URL-decoded search strings
 - IP country lookup:
   - the country of the source IP is logged using an offline data base
 - logging of statistics in server-stats.json:
