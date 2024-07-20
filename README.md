@@ -19,5 +19,5 @@ It has the following features:
 - IP anonymization:
   - the IP in the log file is anonymized. After each start of the runner a new random key is used and thus the anonymization mapping will change then.
 - Search string suppression:
- - If a search string is unlikely to be a query for a Pāḷi word or idiom, it is replaced in the `dpd-fastapi.log` by the rule that was triggered.
+  - If a search string is unlikely to be a query for a Pāḷi word or idiom, it is replaced in the `dpd-fastapi.log` by the rule that was triggered.
 
