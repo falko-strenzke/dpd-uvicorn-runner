@@ -22,18 +22,6 @@ from datetime import timedelta
 import signal
 
 
-"""
-TODOs:
-- [X] logging of anonymized IPs (tracked for some time intervall)
-- [ ] catch exception on level of main and write to an exception log (runner will exit, but subprocess will continue)
-- [ ] long term stats file:
-    - [ ] written at intervals (and also on shutdown)
-    - [ ] read in to init the stats when starting up
-    - [ ] requests per country for each month
-    - [ ] requests / minute
-"""
-
-#DIGITS = "0123456789"
 
 PALI_LONG_VOWELS = "āīū"
 PALI_VAR_LEN_VOWELS = "eo"
@@ -55,7 +43,6 @@ SERVER_STATS = ServerStats()
 gl_mmdb_file = ""
 gl_mmdb_reader = None
 gl_logger: Optional[logging.Logger] = None
-# gl_exit_requested  : bool = False
 
 gl_country_req_cnt_map: dict[str, int] = {}
 
