@@ -131,7 +131,7 @@ def parse_origin_country_from_mmdb_lookup(j: dict, server_stats: ServerStats) ->
     except:
         country += "mmdb-lookup-failure>"
     try:
-        iso_code = j["country"]["iso"]
+        iso_code = j["country"]["iso_code"]
     except:
         iso_code = "mmdb-lookup-failure>"
     server_stats.count_country_code(iso_code)
