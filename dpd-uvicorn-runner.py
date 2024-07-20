@@ -446,10 +446,12 @@ def main_function(
     exit_requested = False
 
     def signal_handler_sigint(sig, frame):
+        nonlocal exit_requested
         exit_requested = True
         gl_logger.info("received signal SIGINT, exiting")
 
     signal.signal(signal.SIGINT, signal_handler_sigint)
+    signal.signal(signal.SIGTERM, signal_handler_sigint)
     create_timed_rotating_log("./dpd-fastapi.log", log_rotation_days, log_backup_count)
     server_stats_str = ""
     with open(server_stats_path, "r") as file:
@@ -504,6 +506,7 @@ def main_function(
                 exit_requested = True
     except Exception:
         gl_logger.error(traceback.format_exc())
+    process.kill()
 
 
 if __name__ == "__main__":
