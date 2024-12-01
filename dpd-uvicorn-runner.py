@@ -74,7 +74,7 @@ def create_process(port: int):
     return subprocess.Popen(
         [
             "uvicorn",
-            "exporter.dpd_fastapi.main:app",
+            "exporter.webapp.main:app",
             "--host",
             "0.0.0.0",
             "--port",
