@@ -67,14 +67,14 @@ def hash_ip(ip_str: str, key: bytes) -> str:
     return str(ipaddress.ip_address(base_bhash + last_bhash))
 
 
-def create_process(port: int):
+def create_process(port: int, app_path : str):
     """
     Create the uvicorn process
     """
     return subprocess.Popen(
         [
             "uvicorn",
-            "exporter.webapp.main:app",
+            app_path,
             "--host",
             "0.0.0.0",
             "--port",
@@ -424,15 +424,26 @@ def create_timed_rotating_log(path, log_rotation_days, log_backup_count):
     help="number of old log files to keep",
     show_default=True,
 )
-@click.option("--simulate-search-string-filtering", is_flag=True, show_default=True, default=False, help="Simulate the search string filtering for requests only: indicate which search string would have been removed by which rule.")
+@click.option(
+    "--simulate-search-string-filtering",
+    is_flag=True, show_default=True,
+    default=False,
+    help="Simulate the search string filtering for requests only: indicate which search string would have been removed by which rule.")
 @click.option(
     "--port",
     type=int,
     default=8080,
     help="Port on which the uvicorn application will listen.",
 )
+@click.option(
+    "--app-path",
+    type=str,
+    default="exporter.webapp.main:app",
+    help='"module path to the uvicorn application. Defaults to "exporter.webapp.main:app"',
+)
 def main_function(
     port,
+    app_path,
     geo_lite_db_file,
     log_backup_count,
     log_rotation_days,
@@ -463,7 +474,7 @@ def main_function(
     )
     server_stats = ServerStats(server_stats_str)
     init_mmdb(geo_lite_db_file)
-    process = create_process(port)
+    process = create_process(port, app_path)
 
     try:
         # works only on unix:
